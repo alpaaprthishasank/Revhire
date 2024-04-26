@@ -1,0 +1,20 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app
+  namespace: default
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: demo-app
+    #matchExpression:
+      #- {key: type, operator: In, values: [dev,test,prod]}
+  template:
+    metadata:
+      labels:
+        app : demo-app
+    spec:
+      containers:
+        - name: demo-app
+          image: shasank2002/ap4

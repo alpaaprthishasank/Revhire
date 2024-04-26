@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException,Query, Depends
+from fastapi import FastAPI, HTTPException,Query, Depends, Response, Header
 from pydantic import BaseModel, EmailStr
 from passlib.context import CryptContext
 import sqlite3
@@ -12,17 +12,46 @@ from pydantic import ValidationError
 from fastapi.responses import JSONResponse
 from job_operations import update_job_details
 from search import search_jobs
-class Job(BaseModel):
-    title: str
-    description: str
-    salary: float
-    location: str
+from job_sekker import create_job_seeker_in_db
+from database import get_db_connection
+from create_token import create_access_token
+from Auth import authenticate_user
+from current_job_seeker_id import get_current_job_seeker_id
+from models import Job,JobSeeker,JobUpdate,Application,Employer
+from create_employer import create_employer_in_db
+import prometheus_client
+import logging
+from prometheus_client.core import CollectorRegistry
+from prometheus_client import Counter,Histogram,Summary
 
 app = FastAPI()
+logging.basicConfig(filename="users.log",encoding='utf-8',filemode='a',level=logging.INFO)
+logger=logging.getLogger(__name__)
+import time
+graphs={}
 
-# Database file
-db_file = 'job_portal.db'
+graphs['job_seeker_reg_counter']=Counter('job_seeker_counter','this is job_seeker reg page')
+graphs['emp_reg_counter']=Counter('emp_counter','this is emp reg page')
+graphs['login_page_counter']=Counter('login_counter','this is login page')
+graphs['jobs_counter']=Counter('job_counter','this is jobs  page')
+graphs['apply_job_counter']=Counter('apply_job_counter','this is apply job page')
 
+
+graphs['job_seeker_reg_hist']=Histogram('job_seeker_hist','get hey python',buckets={1,2,3,5,7,float('inf')})
+graphs['emp_reg_hist']=Histogram('home_hist','get home page',buckets={1,2,3,5,7,float('inf')})
+graphs['login_page_hist']=Histogram('login_page_hist','counter for get users',buckets={1,2,3,5,7,float('inf')})
+graphs['jobs_hist'] = Histogram('jobs_hist','get_users_duration_seconds',buckets={1,2,3,5,7,float('inf')})
+graphs['apply_job_hist']=Histogram('apply_job_hist','this is apply job page',buckets={1,2,3,5,7,float('inf')})
+
+@app.get("/metrics")
+def metrics():
+    result=[]
+    for k,v in graphs.items():
+        result.append(prometheus_client.generate_latest(v))
+    return result
+@app.get("/")
+def startpage():
+    return "hi this start project0"
 # Password hashing context
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
@@ -32,114 +61,15 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
 # Secret key for JWT
 SECRET_KEY = "your_secret_key"
 ALGORITHM = "HS256"
-
-# Define models for FastAPI
-class JobSeeker(BaseModel):
-    name: str
-    email: EmailStr
-    phone: str
-    password: str
-
-class Employer(BaseModel):
-    name: str
-    company_name: str
-    email: EmailStr
-    phone: str
-    password: str
-
-class Application(BaseModel):
-    job_id: int
-    seeker_id: int
-
-class JobUpdate(BaseModel):
-    description: str
-    salary: float
-    location: str
-
-# Function to create a database connection
-def get_db_connection():
-    conn = sqlite3.connect(db_file)
-    return conn
-
-# Function to initialize database tables
-def initialize_db():
-    conn = get_db_connection()
-    cursor = conn.cursor()
-
-    # Create job_seeker and employer tables if not exists
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS job_seeker (
-            seeker_id INTEGER PRIMARY KEY,
-            name TEXT NOT NULL,
-            email TEXT UNIQUE NOT NULL,
-            phone TEXT NOT NULL,
-            password TEXT NOT NULL
-        )
-    ''')
-
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS employer (
-            employer_id INTEGER PRIMARY KEY,
-            name TEXT NOT NULL,
-            company_name TEXT NOT NULL,
-            email TEXT UNIQUE NOT NULL,
-            phone TEXT NOT NULL,
-            password TEXT NOT NULL
-        )
-    ''')
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS application (
-            application_id INTEGER PRIMARY KEY,
-            job_id INTEGER NOT NULL,
-            seeker_id INTEGER NOT NULL,
-            employer_id INTEGER NOT NULL,
-            application_date DATE NOT NULL DEFAULT CURRENT_DATE,
-            status TEXT DEFAULT 'Pending',
-            FOREIGN KEY (job_id) REFERENCES job (job_id),
-            FOREIGN KEY (seeker_id) REFERENCES job_seeker (seeker_id),
-            FOREIGN KEY (employer_id) REFERENCES employer (employer_id)
-        )
-    ''')
-    conn.commit()
-    conn.close()
-
-# Initialize database tables
-initialize_db()
-
-# Authentication functions
-def authenticate_user(username: str, password: str, user_type: str):
-    conn = get_db_connection()
-    cursor = conn.cursor()
-
-    if user_type == "job_seeker":
-        cursor.execute("SELECT * FROM job_seeker WHERE email=?", (username,))
-    elif user_type == "employer":
-        cursor.execute("SELECT * FROM employer WHERE email=?", (username,))
-
-    user = cursor.fetchone()
-    if user_type=="job_seeker":
-        if user:
-            stored_password = user[4]  # Password is stored in the fifth column
-        if pwd_context.verify(password, stored_password):
-            return user
-    elif user_type=="employer":
-        if user:
-            stored_password = user[5]  # Password is stored in the fifth column
-        if pwd_context.verify(password, stored_password):
-            return user
-    return None
-
-def create_access_token(data: dict, expires_delta: timedelta):
-    to_encode = data.copy()
-    expire = datetime.utcnow() + expires_delta
-    to_encode.update({"exp": expire})
-    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-    return encoded_jwt
-
-# Route to authenticate and get JWT token
+conn = get_db_connection()
+cursor = conn.cursor()
+#routes
 @app.post("/login")
 async def login(user_type: str, form_data: OAuth2PasswordRequestForm = Depends()):
     user = authenticate_user(form_data.username, form_data.password, user_type)
+    start=time.time()
+    graphs['login_page_counter'].inc()
+    graphs['login_page_hist'].observe(time.time()-start)
     if not user:
         raise HTTPException(status_code=401, detail="Incorrect email or password")
 
@@ -157,41 +87,21 @@ async def login(user_type: str, form_data: OAuth2PasswordRequestForm = Depends()
 async def create_job_seeker(job_seeker: JobSeeker):
     conn = get_db_connection()
     cursor = conn.cursor()
-
-    cursor.execute("SELECT * FROM job_seeker WHERE email=?", (job_seeker.email,))
-    if cursor.fetchone():
-        raise HTTPException(status_code=400, detail="Email already registered")
-
-    hashed_password = pwd_context.hash(job_seeker.password)
-
-    cursor.execute(
-        "INSERT INTO job_seeker (name, email, phone, password) VALUES (?, ?, ?, ?)",
-        (job_seeker.name, job_seeker.email, job_seeker.phone, hashed_password),
-    )
-    conn.commit()
+    start=time.time()
+    graphs['job_seeker_reg_counter'].inc()
+    graphs['job_seeker_reg_hist'].observe(time.time()-start)
+    create_job_seeker_in_db(cursor, conn, job_seeker)
     conn.close()
-
     return {"message": "Job seeker created successfully"}
 
 # Route to create a new employer
 @app.post("/employer/")
 async def create_employer(employer: Employer):
-    conn = get_db_connection()
-    cursor = conn.cursor()
-
-    cursor.execute("SELECT * FROM employer WHERE email=?", (employer.email,))
-    if cursor.fetchone():
-        raise HTTPException(status_code=400, detail="Email already registered")
-
-    hashed_password = pwd_context.hash(employer.password)
-
-    cursor.execute(
-        "INSERT INTO employer (name, company_name, email, phone, password) VALUES (?, ?, ?, ?, ?)",
-        (employer.name, employer.company_name, employer.email, employer.phone, hashed_password),
-    )
-    conn.commit()
+    start=time.time()
+    graphs['emp_reg_counter'].inc()
+    graphs['emp_reg_hist'].observe(time.time()-start)
+    create_employer_in_db(employer)
     conn.close()
-
     return {"message": "Employer created successfully"}
 
 # Protected route example for job seekers
@@ -216,9 +126,9 @@ async def protected_job_seeker_route(token: str = Depends(oauth2_scheme)):
         return {"user_id": user_id, "username": user[1]}  # Assuming username is the second column (index 1)
 
     except jwt.ExpiredSignatureError:
-        raise HTTPException(status_code=401, detail="Token has expired")
+        raise HTTPException(status_code=401, detail= "Token has expired")
     except (jwt.JWTError, jwt.DecodeError):
-        raise HTTPException(status_code=401, detail="Invalid token")
+        raise HTTPException(status_code=401, detail= "Invalid token")
 
 # Protected route example for employers
 @app.get("/protected_employer/")
@@ -279,6 +189,10 @@ async def create_job(job: Job, token: str = Depends(oauth2_scheme)):
         raise HTTPException(status_code=401, detail="Token has expired")
     except (jwt.JWTError, jwt.DecodeError):
         raise HTTPException(status_code=401, detail="Invalid token")
+    finally:
+        start=time.time()
+        graphs['jobs_counter'].inc()
+        graphs['jobs_hist'].observe(time.time()-start)
 
 
 # Route to retrieve all job seekers
@@ -326,16 +240,6 @@ async def get_jobs():
         raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
 
 
-def get_current_job_seeker_id(token: str = Depends(oauth2_scheme)) -> int:
-    try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        job_seeker_id: int = int(payload.get("sub"))
-        return job_seeker_id
-    except (PyJWTError, ValidationError, ValueError):
-        raise HTTPException(
-            status_code=401,
-            detail="Could not validate credentials, please log in again"
-        )
 
 @app.post("/apply_job/")
 async def apply_job(
@@ -344,7 +248,9 @@ async def apply_job(
 ):
     conn = get_db_connection()
     cursor = conn.cursor()
-
+    start=time.time()
+    graphs['apply_job_counter'].inc()
+    graphs['apply_job_hist'].observe(time.time()-start)
     # Retrieve employer_id associated with the job_id
     cursor.execute("SELECT employer_id FROM job WHERE job_id=?", (job_id,))
     job_data = cursor.fetchone()
@@ -366,9 +272,6 @@ async def apply_job(
     return {"message": "Job application submitted successfully"}
 
 
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=4000, debug=True)
 
 
 @app.get('/jobs/search', response_model=list[Job])
@@ -393,7 +296,4 @@ async def update_job(job_id: int, job_update: JobUpdate, employer_id: int = Depe
 
 
 
-if __name__ == '__main__':
-    import uvicorn
-    uvicorn.run(app, host='127.0.0.1', port=8000)
 
