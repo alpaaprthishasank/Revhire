@@ -11,11 +11,11 @@ cursor = conn.cursor()
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
 from jwt import PyJWTError, decode
 from pydantic import ValidationError
-def get_current_job_seeker_id(token: str = Depends(oauth2_scheme)) -> int:
+def get_current_emp_seeker_id(token: str = Depends(oauth2_scheme)) -> int:
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        job_seeker_id: int = int(payload.get("sub"))
-        cursor.execute("SELECT * FROM job_seeker WHERE seeker_id=?", (job_seeker_id,))
+        emp_id: int = int(payload.get("sub"))
+        cursor.execute("SELECT * FROM employer WHERE employer_id=?", (emp_id,))
         user = cursor.fetchone()
         return user
     

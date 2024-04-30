@@ -17,8 +17,10 @@ from database import get_db_connection
 from create_token import create_access_token
 from Auth import authenticate_user
 from current_job_seeker_id import get_current_job_seeker_id
+from current_employer_id import get_current_emp_seeker_id
 from models import Job,JobSeeker,JobUpdate,Application,Employer
 from create_employer import create_employer_in_db
+from upload_jobs import post_job
 import prometheus_client
 import logging
 from prometheus_client.core import CollectorRegistry
@@ -58,7 +60,7 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 # OAuth2 password bearer for token authentication
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
 
-# Secret key for JWT
+
 SECRET_KEY = "your_secret_key"
 ALGORITHM = "HS256"
 conn = get_db_connection()
@@ -73,7 +75,6 @@ async def login(user_type: str, form_data: OAuth2PasswordRequestForm = Depends()
     if not user:
         raise HTTPException(status_code=401, detail="Incorrect email or password")
 
-    # Generate JWT token
     user_id = user[0]
     access_token_expires = timedelta(minutes=30)
     access_token = create_access_token(
@@ -82,7 +83,6 @@ async def login(user_type: str, form_data: OAuth2PasswordRequestForm = Depends()
     )
     return {"access_token": access_token, "token_type": "bearer"}
 
-# Route to create a new job seeker
 @app.post("/job_seeker/")
 async def create_job_seeker(job_seeker: JobSeeker):
     conn = get_db_connection()
@@ -94,7 +94,6 @@ async def create_job_seeker(job_seeker: JobSeeker):
     conn.close()
     return {"message": "Job seeker created successfully"}
 
-# Route to create a new employer
 @app.post("/employer/")
 async def create_employer(employer: Employer):
     start=time.time()
@@ -104,115 +103,38 @@ async def create_employer(employer: Employer):
     conn.close()
     return {"message": "Employer created successfully"}
 
-# Protected route example for job seekers
 @app.get("/protected_job_seeker/")
 async def protected_job_seeker_route(token: str = Depends(oauth2_scheme)):
-    try:
-        # Decode and verify the access_token
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        user_id = int(payload["sub"])  # Extract user_id from the token's payload
-
-        # Retrieve user information from the database based on user_id
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM job_seeker WHERE seeker_id=?", (user_id,))
-        user = cursor.fetchone()
-        conn.close()
-
-        if not user:
-            raise HTTPException(status_code=404, detail="User not found")
-
-        # Return user information or perform other actions based on authentication
-        return {"user_id": user_id, "username": user[1]}  # Assuming username is the second column (index 1)
-
-    except jwt.ExpiredSignatureError:
-        raise HTTPException(status_code=401, detail= "Token has expired")
-    except (jwt.JWTError, jwt.DecodeError):
-        raise HTTPException(status_code=401, detail= "Invalid token")
-
-# Protected route example for employers
+        user=get_current_job_seeker_id(token)
+        return {"user_id": user[0],"username":user[1]}
+        
 @app.get("/protected_employer/")
 async def protected_employer_route(token: str = Depends(oauth2_scheme)):
-    try:
-        # Decode and verify the access_token
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        user_id = int(payload["sub"])  # Extract user_id from the token's payload
-
-        # Retrieve user information from the database based on user_id
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM employer WHERE employer_id=?", (user_id,))
-        user = cursor.fetchone()
-        conn.close()
-
-        if not user:
-            raise HTTPException(status_code=404, detail="User not found")
-
-        # Return user information or perform other actions based on authentication
-        return {"user_id": user_id, "username": user[1]}  # Assuming username is the second column (index 1)
-
-    except jwt.ExpiredSignatureError:
-        raise HTTPException(status_code=401, detail="Token has expired")
-    except (jwt.JWTError, jwt.DecodeError):
-        raise HTTPException(status_code=401, detail="Invalid token")
+        emp=get_current_emp_seeker_id(token)
+        return {"user_id": emp[0],"username":emp[1]}
+    
 
 
 @app.post("/jobs/")
 async def create_job(job: Job, token: str = Depends(oauth2_scheme)):
-    try:
-        # Decode and verify the access_token to get the employer_id
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        employer_id = int(payload["sub"])  # Extract employer_id from the token's payload
-
-        # Create a connection to the database
-        conn = get_db_connection()
-        cursor = conn.cursor()
-
-        # Check if the employer exists
-        cursor.execute("SELECT * FROM employer WHERE employer_id=?", (employer_id,))
-        employer = cursor.fetchone()
-        if not employer:
-            conn.close()
-            raise HTTPException(status_code=404, detail="Employer not found")
-
-        # Insert the job into the database
-        cursor.execute(
-            "INSERT INTO job (employer_id, title, description, salary, location, posted_date) VALUES (?, ?, ?, ?, ?, ?)",
-            (employer_id, job.title, job.description, job.salary, job.location, date.today()),
-        )
-        conn.commit()
-        conn.close()
-
-        return {"message": "Job posted successfully"}
-
-    except jwt.ExpiredSignatureError:
-        raise HTTPException(status_code=401, detail="Token has expired")
-    except (jwt.JWTError, jwt.DecodeError):
-        raise HTTPException(status_code=401, detail="Invalid token")
-    finally:
-        start=time.time()
-        graphs['jobs_counter'].inc()
-        graphs['jobs_hist'].observe(time.time()-start)
+       r= post_job(token,job)
+       start=time.time()
+       graphs['jobs_counter'].inc()
+       graphs['jobs_hist'].observe(time.time()-start)
+       return r
+        
 
 
-# Route to retrieve all job seekers
+
 @app.get("/job_seekers/")
 async def get_job_seekers():
-    conn = get_db_connection()
-    cursor = conn.cursor()
-
     cursor.execute("SELECT seeker_id, name, email,password ,phone FROM job_seeker")
     job_seekers = cursor.fetchall()
-
     conn.close()
     return {"job_seekers": job_seekers}
 
-# Route to retrieve all employers
 @app.get("/employers/")
 async def get_employers():
-    conn = get_db_connection()
-    cursor = conn.cursor()
-
     cursor.execute("SELECT employer_id, name, company_name, email,password, phone FROM employer")
     employers = cursor.fetchall()
 
@@ -221,22 +143,14 @@ async def get_employers():
 @app.get("/jobs/")
 async def get_jobs():
     try:
-        # Create a connection to the database
         conn = get_db_connection()
         cursor = conn.cursor()
-
-        # Retrieve all jobs from the database
         cursor.execute("SELECT * FROM job")
         jobs = cursor.fetchall()
-
-        # Close the database connection
         conn.close()
-
-        # Return the list of jobs as a response
         return {"jobs": jobs}
 
     except Exception as e:
-        # Handle any database errors or exceptions
         raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
 
 
@@ -251,7 +165,6 @@ async def apply_job(
     start=time.time()
     graphs['apply_job_counter'].inc()
     graphs['apply_job_hist'].observe(time.time()-start)
-    # Retrieve employer_id associated with the job_id
     cursor.execute("SELECT employer_id FROM job WHERE job_id=?", (job_id,))
     job_data = cursor.fetchone()
 
@@ -261,7 +174,6 @@ async def apply_job(
 
     employer_id = job_data[0]
 
-    # Insert the job application into the application table
     cursor.execute(
         "INSERT INTO application (job_id, seeker_id, employer_id, application_date) VALUES (?, ?, ?, ?)",
         (job_id, current_job_seeker_id, employer_id, datetime.today())
@@ -287,9 +199,6 @@ async def search_jobs_endpoint(keyword: str = Query(..., min_length=1)):
 
 @app.put('/jobs/{job_id}', response_model=JobUpdate)
 async def update_job(job_id: int, job_update: JobUpdate, employer_id: int = Depends(get_current_job_seeker_id)):
-    # Validate employer_id and perform authorization logic here if needed
-
-    # Call the update_job_details function from job_operations.py
     update_job_details(job_id, job_update.dict())
 
     return job_update
